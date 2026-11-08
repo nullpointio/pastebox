@@ -45,6 +45,37 @@ const OPEN_RETRY_DELAY: Duration = Duration::from_millis(15);
 /// runtime because it is assigned per-session.
 const PNG_NAME: [u16; 4] = [b'P' as u16, b'N' as u16, b'G' as u16, 0];
 
+/// The clipboard format a private source sets to say "do not keep this".
+/// Password managers and browsers put it on the clipboard with the secret;
+/// honouring it is why Pastebox never records a vault entry even when the
+/// secret is the current clipboard content.
+const EXCLUDE_FORMAT_NAME: &str = "ExcludeClipboardContentFromMonitorProcessing";
+
+/// `name` as a NUL-terminated UTF-16 buffer for the Win32 `*W` entry points.
+fn wide_name(name: &str) -> Vec<u16> {
+    name.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+/// The per-session id of a registered clipboard format, or 0 when the lookup
+/// failed (in which case no one can have set it).
+fn registered_format(name: &str) -> u32 {
+    let name = wide_name(name);
+    // SAFETY: `name` is NUL-terminated and outlives the call.
+    unsafe { RegisterClipboardFormatW(name.as_ptr()) }
+}
+
+/// Whether the current clipboard owner asked clipboard managers to skip this
+/// content. Registered formats live above `0xC000`, so an id of 0 means the
+/// format is not registered in this session and cannot be on the clipboard.
+fn owner_excludes_history() -> bool {
+    let id = registered_format(EXCLUDE_FORMAT_NAME);
+    if id == 0 {
+        return false;
+    }
+    // SAFETY: no preconditions; a registered id is a valid format argument.
+    unsafe { IsClipboardFormatAvailable(id) != 0 }
+}
+
 /// A clipboard read that produced a row, plus the raw image bytes (if any) that
 /// the model deliberately does not carry.
 pub struct Captured {
@@ -260,6 +291,11 @@ fn available(format: u16) -> bool {
 /// Read the clipboard into a row, or `None` when it holds nothing we model.
 pub fn capture(now_ms: u64) -> Option<Captured> {
     let _open = Open::acquire()?;
+
+    // The owner said "do not keep this": honour it before reading anything.
+    if owner_excludes_history() {
+        return None;
+    }
 
     // Files beat text: Explorer puts both on the clipboard for a file copy.
     if available(CF_HDROP) {
@@ -542,5 +578,24 @@ impl ImageCache {
                 self.bytes -= dropped.len();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_exclusion_format_name_is_the_documented_one() {
+        assert_eq!(
+            EXCLUDE_FORMAT_NAME,
+            "ExcludeClipboardContentFromMonitorProcessing"
+        );
+        // Win32 takes a NUL-terminated LPCWSTR; a missing terminator would read
+        // past the buffer.
+        let wide = wide_name(EXCLUDE_FORMAT_NAME);
+        assert_eq!(wide.len(), EXCLUDE_FORMAT_NAME.len() + 1);
+        assert_eq!(wide.last().copied(), Some(0));
+        assert!(wide[..wide.len() - 1].iter().all(|&unit| unit != 0));
     }
 }

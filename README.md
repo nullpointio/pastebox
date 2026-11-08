@@ -31,7 +31,9 @@ A clipboard manager sees everything you copy, including passwords. Pastebox is b
   process. The footer shows how much is on disk, which is `0 B` unless you have pins.
 - **Pinned items only** are saved, to a single plain-text file you can read and delete.
 
-If you copy from a password manager, most already suppress clipboard history on their side.
+If you copy from a password manager, most already suppress clipboard history on their side — and
+whenever the clipboard carries the `ExcludeClipboardContentFromMonitorProcessing` format, Pastebox
+skips that item entirely, whoever set it.
 
 ## Use
 

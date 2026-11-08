@@ -110,6 +110,17 @@ pub fn body_height(panel_h: f32) -> f32 {
     (panel_h - HEADER_H - CHIPS_H - 2.0 - FOOTER_H).max(0.0)
 }
 
+/// The column an empty or no-results composition is centred in: the whole
+/// content width, list plus preview, so the block sits on the palette's axis
+/// instead of in the 600 px list column.
+#[must_use]
+pub fn state_column(list: Rect, panel: Rect) -> Rect {
+    Rect::from_min_size(
+        list.min,
+        Vec2::new((panel.right() - list.left()).max(1.0), list.height()),
+    )
+}
+
 /// Whole rows that fit in a list of `list_h`.
 #[must_use]
 pub fn whole_rows(list_h: f32) -> usize {
@@ -273,5 +284,29 @@ mod tests {
         assert_eq!(scroll_to_show(10, 3, 8, 30), 3);
         assert_eq!(scroll_to_show(30, 29, 8, 30), 22);
         assert_eq!(scroll_to_show(5, 0, 8, 3), 0);
+    }
+
+    #[test]
+    fn state_blocks_centre_on_the_palette_not_the_list_column() {
+        let panel = Rect::from_min_size(Pos2::new(160.0, 100.0), Vec2::new(PANEL_W, PANEL_H));
+        let list = Rect::from_min_size(
+            Pos2::new(panel.left(), 200.0),
+            Vec2::new(list_width(panel.width()), 300.0),
+        );
+        let state = state_column(list, panel);
+        assert_eq!(state.center().x, panel.center().x);
+        assert_eq!(state.width(), PANEL_W);
+        assert_eq!(state.top(), list.top());
+        assert_eq!(state.height(), list.height());
+        // A narrow panel has no preview to reclaim, so it keeps the list width.
+        let narrow = Rect::from_min_size(Pos2::ZERO, Vec2::new(PREVIEW_BREAKPOINT - 40.0, 440.0));
+        let narrow_list = Rect::from_min_size(
+            Pos2::new(0.0, 60.0),
+            Vec2::new(list_width(narrow.width()), 300.0),
+        );
+        assert_eq!(
+            state_column(narrow_list, narrow).center().x,
+            narrow.center().x
+        );
     }
 }

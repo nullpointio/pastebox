@@ -93,6 +93,49 @@ impl Filter {
         }
     }
 
+    /// Plural noun for "no … clips" copy.
+    fn noun(self) -> &'static str {
+        match self {
+            Filter::All => "clips",
+            Filter::Text => "text clips",
+            Filter::Images => "image clips",
+            Filter::Files => "file clips",
+            Filter::Links => "link clips",
+            Filter::Pinned => "pinned clips",
+        }
+    }
+
+    /// Headline for a filter that matched nothing in a non-empty history.
+    fn empty_title(self) -> &'static str {
+        match self {
+            Filter::All => "No clips",
+            Filter::Text => "No text clips",
+            Filter::Images => "No image clips",
+            Filter::Files => "No file clips",
+            Filter::Links => "No link clips",
+            Filter::Pinned => "Nothing pinned",
+        }
+    }
+
+    /// Second line for a filter that matched nothing.
+    fn empty_body(self, total: usize) -> String {
+        let none = if total == 1 {
+            "Your only clip isn't".to_string()
+        } else {
+            format!("None of your {total} clips is")
+        };
+        match self {
+            Filter::All => "No clips are hidden by this view.".to_string(),
+            Filter::Text => format!("{none} text. Copy some text and it appears here."),
+            Filter::Images => format!("{none} an image. Copy a picture and it appears here."),
+            Filter::Files => format!("{none} a file. Copy a file and it appears here."),
+            Filter::Links => format!("{none} a link. Copy a URL and it appears here."),
+            Filter::Pinned => {
+                "Select a clip and press Ctrl P to keep it across restarts.".to_string()
+            }
+        }
+    }
+
     fn from_index(i: usize) -> Self {
         match i {
             1 => Filter::Text,
@@ -161,6 +204,12 @@ impl PasteboxApp {
     ) -> Self {
         let ctx = cc.egui_ctx.clone();
         source.attach(Box::new(move || ctx.request_repaint()));
+        Self::bare(source, now_ms)
+    }
+
+    /// Construct without an egui context, so headless tests can drive the
+    /// key handler directly.
+    fn bare(source: Box<dyn ClipboardSource>, now_ms: u64) -> Self {
         let mut app = Self {
             source,
             sink: None,
@@ -300,8 +349,18 @@ impl PasteboxApp {
     }
 
     fn handle_keys(&mut self, ctx: &egui::Context) {
-        let cmd = ctx.input(|i| i.modifiers.command || i.modifiers.ctrl);
-        let shift = ctx.input(|i| i.modifiers.shift);
+        // Shortcuts are matched against the modifiers carried by the key event,
+        // never the frame-level `InputState::modifiers`. A backend that does
+        // not forward `ModifiersChanged` (Wine's winit among them) leaves the
+        // frame state all-false while Ctrl is physically held, so a
+        // frame-state check silently drops every Ctrl shortcut — including
+        // Ctrl+P, Ctrl+1…5 — even though the `Event::Key` says `ctrl: true`.
+        let shift = ctx.input(|i| i.modifiers.shift)
+            || ctx.input(|i| {
+                i.events.iter().any(|e| {
+                    matches!(e, egui::Event::Key { pressed: true, modifiers, .. } if modifiers.shift)
+                })
+            });
 
         let mut moved = false;
         ctx.input(|i| {
@@ -351,7 +410,7 @@ impl PasteboxApp {
         .into_iter()
         .enumerate()
         {
-            if cmd && ctx.input(|i| i.key_pressed(key)) {
+            if handles_command(ctx, key) {
                 self.filter = Filter::from_index(n);
                 self.selected = 0;
                 self.refresh();
@@ -368,7 +427,7 @@ impl PasteboxApp {
 
         if let Some(id) = self.selected_id() {
             if ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
-                if cmd {
+                if handles_command(ctx, egui::Key::Enter) {
                     self.action = Some(Action::Copy { id });
                     self.toast("Copied", false);
                 } else {
@@ -378,12 +437,14 @@ impl PasteboxApp {
                     }
                 }
             }
-            if cmd && ctx.input(|i| i.key_pressed(egui::Key::P)) {
+            if handles_command(ctx, egui::Key::P) {
                 let pinned = self.selected_clip().map(|c| !c.pinned).unwrap_or(false);
                 self.action = Some(Action::Pin { id, pinned });
                 self.toast(if pinned { "Pinned" } else { "Unpinned" }, false);
             }
-            if !cmd && ctx.input(|i| i.key_pressed(egui::Key::Delete)) {
+            if !handles_command(ctx, egui::Key::Delete)
+                && ctx.input(|i| i.key_pressed(egui::Key::Delete))
+            {
                 self.action = Some(Action::Remove { id });
             }
         }
@@ -468,6 +529,24 @@ impl PasteboxApp {
     }
 }
 
+/// Whether `key` was pressed this frame while Ctrl (or Cmd) was held.
+///
+/// Reads the modifiers off the key event itself: the frame-level
+/// `InputState::modifiers` is not dependable, because a backend that never
+/// delivers `ModifiersChanged` — Wine's winit does not — leaves it all-false
+/// while Ctrl is physically down.
+fn handles_command(ctx: &egui::Context, key: egui::Key) -> bool {
+    ctx.input(|i| {
+        i.events.iter().any(|event| {
+            matches!(
+                event,
+                egui::Event::Key { key: pressed, pressed: true, modifiers, .. }
+                    if *pressed == key && (modifiers.command || modifiers.ctrl)
+            )
+        })
+    })
+}
+
 impl PasteboxApp {
     fn paint(&mut self, ui: &mut Ui, canvas: Rect) {
         let pal = self.palette();
@@ -524,13 +603,26 @@ impl PasteboxApp {
         self.visible_rows = layout::whole_rows(body_h).max(1);
 
         let matches = self.matches.clone();
+        let history_empty = self.source.clips().is_empty();
+        let history_total = self.source.total();
+        let filter_now = self.filter;
         let clips = self.source.clips();
         let mut need_refresh = false;
 
         if matches.is_empty() {
-            if self.query.trim().is_empty() {
-                paint_empty(&painter, &pal, list);
-            } else if paint_no_results(ui, &painter, &pal, list, &self.query) {
+            // Empty states own the whole content width — no preview pane and no
+            // divider — so the composition is centred on the palette rather
+            // than in the 600 px list column.
+            let content = layout::state_column(list, panel);
+            if history_empty {
+                paint_empty(ui, &painter, &pal, content);
+            } else if self.query.trim().is_empty() {
+                if paint_filter_empty(ui, &painter, &pal, content, filter_now, history_total) {
+                    self.filter = Filter::All;
+                    self.selected = 0;
+                    need_refresh = true;
+                }
+            } else if paint_no_results(ui, &painter, &pal, content, &self.query, filter_now) {
                 self.query.clear();
                 need_refresh = true;
             }
@@ -608,7 +700,7 @@ impl PasteboxApp {
             );
         }
 
-        if preview {
+        if preview && !matches.is_empty() {
             let div_x = panel.left() + list_w;
             painter.rect_filled(
                 Rect::from_min_size(Pos2::new(div_x, body_top), Vec2::new(1.0, body_h)),
@@ -642,7 +734,12 @@ impl PasteboxApp {
             Pos2::new(panel.left() + TITLE_X, panel.top() + 20.0),
             Vec2::new(620.0, 24.0),
         );
-        let placeholder = format!("Search {} clips…", self.source.total());
+        let n = self.source.total();
+        let placeholder = if n == 1 {
+            "Search 1 clip…".to_string()
+        } else {
+            format!("Search {n} clips…")
+        };
         let edit = egui::TextEdit::singleline(&mut self.query)
             .id(Id::new("pastebox.search"))
             .frame(false)
@@ -1154,116 +1251,123 @@ fn paint_preview_body(
     }
 }
 
-fn paint_empty(painter: &egui::Painter, pal: &Palette, list: Rect) {
-    let width = 280.0;
-    let cx = list.center().x;
-    let mut y = list.center().y - 76.0;
-
-    icons::paint(
-        painter,
-        Icon::Text,
-        Rect::from_center_size(Pos2::new(cx, y + 20.0), Vec2::splat(40.0)),
-        pal.text_tertiary,
-    );
-    y += 56.0;
-
-    draw_tracked(
-        painter,
-        Pos2::new(cx, y),
-        "Nothing copied yet",
-        tokens::ui(type_size::EMPTY_TITLE),
-        pal.text_primary,
-        0.0,
-        Align2::CENTER_TOP,
-    );
-    y += 28.0;
-
-    let body = painter.layout_job(layout_job(
-        "Copy anything and it appears here. Nothing is saved to disk.",
-        tokens::ui(type_size::EMPTY_BODY),
-        pal.text_secondary,
-        20.0,
-        0.0,
-        width,
-    ));
-    painter.galley(
-        Pos2::new(cx - body.size().x / 2.0, y),
-        body.clone(),
-        pal.text_secondary,
-    );
-    y += body.size().y + 16.0;
-
-    let cap_w = 34.0;
-    let gap = 4.0;
-    let total = cap_w * 2.0 + gap;
-    let mut x = cx - total / 2.0;
-    for label in ["Ctrl", "C"] {
-        let cap = Rect::from_min_size(Pos2::new(x, y), Vec2::new(cap_w, 20.0));
-        paint_keycap_body(painter, pal, cap);
-        draw_tracked(
-            painter,
-            cap.center(),
-            label,
-            tokens::ui(type_size::KBD),
-            pal.text_secondary,
-            0.0,
-            Align2::CENTER_CENTER,
-        );
-        x += cap_w + gap;
-    }
+/// What sits under the body copy of a state block.
+enum StateFooter {
+    /// `Ctrl` `C` keycaps.
+    Keycaps(&'static [&'static str]),
+    /// A single accent-coloured link; the bool is the click result.
+    Link(&'static str, &'static str),
+    None,
 }
 
-fn paint_no_results(
+/// What an empty state says.
+struct StateSpec<'a> {
+    icon: Icon,
+    title: &'a str,
+    body: &'a str,
+    footer: StateFooter,
+}
+
+/// One centred state composition — icon, headline, body, footer — laid out on
+/// the content width and centred both ways inside `area`.
+fn paint_state(
     ui: &mut Ui,
     painter: &egui::Painter,
     pal: &Palette,
-    list: Rect,
-    query: &str,
+    area: Rect,
+    spec: StateSpec<'_>,
 ) -> bool {
-    let width = 280.0;
-    let cx = list.center().x;
-    let mut y = list.center().y - 84.0;
-
-    icons::paint(
-        painter,
-        Icon::Search,
-        Rect::from_center_size(Pos2::new(cx, y + 20.0), Vec2::splat(40.0)),
-        pal.text_tertiary,
-    );
-    y += 56.0;
-
-    let title = format!("No clips match “{query}”");
+    let StateSpec {
+        icon,
+        title,
+        body,
+        footer,
+    } = spec;
+    let width = 360.0_f32.min(area.width() - 64.0).max(200.0);
     let title_galley = painter.layout_job(layout_job(
-        &title,
+        title,
         tokens::ui(type_size::EMPTY_TITLE),
         pal.text_primary,
         24.0,
         0.0,
         width,
     ));
-    painter.galley(
-        Pos2::new(cx - title_galley.size().x / 2.0, y),
-        title_galley.clone(),
-        pal.text_primary,
-    );
-    y += title_galley.size().y + 6.0;
-
-    let body = painter.layout_job(layout_job(
-        "Search matches titles, URLs, file names, and app names. Images match by app and date only.",
+    let body_galley = painter.layout_job(layout_job(
+        body,
         tokens::ui(type_size::EMPTY_BODY),
         pal.text_secondary,
         20.0,
         0.0,
         width,
     ));
+
+    let footer_h = match footer {
+        StateFooter::None => 0.0,
+        _ => 16.0 + 20.0,
+    };
+    let height = 56.0 + title_galley.size().y + 8.0 + body_galley.size().y + footer_h;
+
+    let cx = area.center().x;
+    let mut y = area.center().y - height / 2.0;
+
+    icons::paint(
+        painter,
+        icon,
+        Rect::from_center_size(Pos2::new(cx, y + 20.0), Vec2::splat(40.0)),
+        pal.text_tertiary,
+    );
+    y += 56.0;
+
     painter.galley(
-        Pos2::new(cx - body.size().x / 2.0, y),
-        body.clone(),
+        Pos2::new(cx - title_galley.size().x / 2.0, y),
+        title_galley.clone(),
+        pal.text_primary,
+    );
+    y += title_galley.size().y + 8.0;
+
+    painter.galley(
+        Pos2::new(cx - body_galley.size().x / 2.0, y),
+        body_galley.clone(),
         pal.text_secondary,
     );
-    y += body.size().y + 16.0;
+    y += body_galley.size().y + 16.0;
 
-    let label = "Clear search";
+    match footer {
+        StateFooter::None => false,
+        StateFooter::Keycaps(labels) => {
+            let cap_w = 34.0;
+            let gap = 4.0;
+            let total = cap_w * labels.len() as f32 + gap * (labels.len().saturating_sub(1)) as f32;
+            let mut x = cx - total / 2.0;
+            for label in labels {
+                let cap = Rect::from_min_size(Pos2::new(x, y), Vec2::new(cap_w, 20.0));
+                paint_keycap_body(painter, pal, cap);
+                draw_tracked(
+                    painter,
+                    cap.center(),
+                    label,
+                    tokens::ui(type_size::KBD),
+                    pal.text_secondary,
+                    0.0,
+                    Align2::CENTER_CENTER,
+                );
+                x += cap_w + gap;
+            }
+            false
+        }
+        StateFooter::Link(label, id) => paint_state_link(ui, painter, pal, cx, y, label, id),
+    }
+}
+
+fn paint_state_link(
+    ui: &mut Ui,
+    painter: &egui::Painter,
+    pal: &Palette,
+    cx: f32,
+    y: f32,
+    label: &str,
+    id: &str,
+) -> bool {
     let w = painter
         .layout_no_wrap(
             label.to_string(),
@@ -1273,7 +1377,7 @@ fn paint_no_results(
         .size()
         .x;
     let rect = Rect::from_min_size(Pos2::new(cx - w / 2.0, y), Vec2::new(w, 20.0));
-    let resp = ui.interact(rect, Id::new("clear-search"), Sense::click());
+    let resp = ui.interact(rect, Id::new(id), Sense::click());
     if resp.hovered() {
         painter.rect_filled(
             rect.expand2(Vec2::new(6.0, 2.0)),
@@ -1291,6 +1395,88 @@ fn paint_no_results(
         Align2::LEFT_CENTER,
     );
     resp.clicked()
+}
+
+/// History is genuinely empty: nothing has ever been copied.
+fn paint_empty(ui: &mut Ui, painter: &egui::Painter, pal: &Palette, area: Rect) {
+    paint_state(
+        ui,
+        painter,
+        pal,
+        area,
+        StateSpec {
+            icon: Icon::Text,
+            title: "Nothing copied yet",
+            body: "Copy anything and it appears here. Nothing is saved to disk.",
+            footer: StateFooter::Keycaps(&["Ctrl", "C"]),
+        },
+    );
+}
+
+/// The history has clips, but the active kind filter matched none of them.
+fn paint_filter_empty(
+    ui: &mut Ui,
+    painter: &egui::Painter,
+    pal: &Palette,
+    area: Rect,
+    filter: Filter,
+    total: usize,
+) -> bool {
+    let icon = match filter {
+        Filter::Images => Icon::Image,
+        Filter::Files => Icon::File,
+        Filter::Links => Icon::Link,
+        Filter::Pinned => Icon::Pin,
+        _ => Icon::Text,
+    };
+    let title = filter.empty_title().to_string();
+    let body = filter.empty_body(total);
+    let footer = if filter == Filter::All {
+        StateFooter::None
+    } else {
+        StateFooter::Link("Show all clips", "show-all-clips")
+    };
+    paint_state(
+        ui,
+        painter,
+        pal,
+        area,
+        StateSpec {
+            icon,
+            title: &title,
+            body: &body,
+            footer,
+        },
+    )
+}
+
+/// A query with no hits, optionally narrowed by a kind filter.
+fn paint_no_results(
+    ui: &mut Ui,
+    painter: &egui::Painter,
+    pal: &Palette,
+    area: Rect,
+    query: &str,
+    filter: Filter,
+) -> bool {
+    let title = if filter == Filter::All {
+        format!("No clips match “{query}”")
+    } else {
+        format!("No {} match “{query}”", filter.noun())
+    };
+    let body = "Titles, URLs and file names are searched. Images match by caption.";
+    paint_state(
+        ui,
+        painter,
+        pal,
+        area,
+        StateSpec {
+            icon: Icon::Search,
+            title: &title,
+            body,
+            footer: StateFooter::Link("Clear search", "clear-search"),
+        },
+    )
 }
 
 /// A hairline scroll indicator that only appears while the pointer is in the
@@ -1566,5 +1752,165 @@ mod tests {
         assert_eq!(Filter::CHIPS[0].1, "All");
         assert_eq!(Filter::from_index(2), Filter::Images);
         assert_eq!(Filter::from_index(0), Filter::All);
+    }
+
+    /// Feed one key press through a real `egui::Context`. `frame` is the
+    /// frame-level modifier state the *backend* reports, which is what the
+    /// real Wine session fails to populate; the event carries its own.
+    fn press_frame(
+        app: &mut PasteboxApp,
+        key: egui::Key,
+        frame: egui::Modifiers,
+        event: egui::Modifiers,
+    ) {
+        let ctx = egui::Context::default();
+        let raw = egui::RawInput {
+            time: Some(1.0),
+            modifiers: frame,
+            events: vec![egui::Event::Key {
+                key,
+                physical_key: Some(key),
+                pressed: true,
+                repeat: false,
+                modifiers: event,
+            }],
+            ..Default::default()
+        };
+        let _ = ctx.run(raw, |c| app.handle_keys(c));
+    }
+
+    fn press(app: &mut PasteboxApp, key: egui::Key, mods: egui::Modifiers) {
+        press_frame(app, key, mods, mods);
+    }
+
+    fn first_row_id(app: &PasteboxApp) -> u64 {
+        app.selected_id()
+            .expect("demo fixture has a selectable row")
+    }
+
+    /// Wine's winit backend sends the key with `ctrl: true` but never updates
+    /// the frame-level modifier state, so `InputState::modifiers` is all-false.
+    /// Captured from a live run; this is the release-blocking shape.
+    #[test]
+    fn ctrl_p_pins_when_the_backend_reports_no_frame_modifiers() {
+        let mut app = PasteboxApp::bare(Box::new(crate::DemoSource::hero()), 0);
+        app.visible_rows = 6;
+        let id = first_row_id(&app);
+        let pinned_now = app.selected_clip().is_some_and(|c| c.pinned);
+        press_frame(
+            &mut app,
+            egui::Key::P,
+            egui::Modifiers::NONE,
+            egui::Modifiers::CTRL,
+        );
+        match app.take_action() {
+            Some(Action::Pin { id: got, pinned }) => {
+                assert_eq!(got, id, "pin must target the selected row");
+                assert_eq!(pinned, !pinned_now, "pin must toggle");
+            }
+            other => panic!("Ctrl+P produced {other:?}, expected Action::Pin"),
+        }
+    }
+
+    #[test]
+    fn ctrl_p_pins_the_selected_row() {
+        let mut app = PasteboxApp::bare(Box::new(crate::DemoSource::hero()), 0);
+        app.visible_rows = 6;
+        let id = first_row_id(&app);
+        let pinned_now = app.selected_clip().is_some_and(|c| c.pinned);
+        press(&mut app, egui::Key::P, egui::Modifiers::CTRL);
+        match app.take_action() {
+            Some(Action::Pin { id: got, pinned }) => {
+                assert_eq!(got, id, "pin must target the selected row");
+                assert_eq!(pinned, !pinned_now, "pin must toggle");
+            }
+            other => panic!("Ctrl+P produced {other:?}, expected Action::Pin"),
+        }
+    }
+
+    #[test]
+    fn ctrl_p_works_with_a_search_field_focused() {
+        // The search box holds keyboard focus for the palette's whole life, so
+        // the shortcut must survive the text edit's own event handling.
+        let mut app = PasteboxApp::bare(Box::new(crate::DemoSource::hero()), 0);
+        app.visible_rows = 6;
+        app.focus_search = true;
+        let id = first_row_id(&app);
+        let ctx = egui::Context::default();
+        let raw = egui::RawInput {
+            time: Some(1.0),
+            modifiers: egui::Modifiers::CTRL,
+            events: vec![egui::Event::Key {
+                key: egui::Key::P,
+                physical_key: Some(egui::Key::P),
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::CTRL,
+            }],
+            ..Default::default()
+        };
+        // Run a full frame, so the header's TextEdit also consumes events.
+        let _ = ctx.run(raw, |c| {
+            app.handle_keys(c);
+            let mut q = app.query.clone();
+            let edit = egui::TextEdit::singleline(&mut q).id(Id::new("pastebox.search"));
+            egui::CentralPanel::default().show(c, |ui| {
+                ui.put(
+                    Rect::from_min_size(Pos2::ZERO, Vec2::new(200.0, 24.0)),
+                    edit,
+                );
+            });
+        });
+        assert!(
+            matches!(app.take_action(), Some(Action::Pin { id: got, .. }) if got == id),
+            "Ctrl+P was swallowed by the focused text edit"
+        );
+    }
+
+    #[test]
+    fn ctrl_number_selects_a_chip() {
+        let mut app = PasteboxApp::bare(Box::new(crate::DemoSource::hero()), 0);
+        app.visible_rows = 6;
+        press_frame(
+            &mut app,
+            egui::Key::Num3,
+            egui::Modifiers::NONE,
+            egui::Modifiers::CTRL,
+        );
+        assert_eq!(app.filter, Filter::Images);
+    }
+
+    #[test]
+    fn a_filter_with_no_hits_never_claims_the_history_is_empty() {
+        assert_eq!(Filter::Images.empty_title(), "No image clips");
+        assert_eq!(Filter::Files.empty_title(), "No file clips");
+        assert_eq!(Filter::Links.empty_title(), "No link clips");
+        assert_eq!(Filter::Pinned.empty_title(), "Nothing pinned");
+        for filter in [Filter::Text, Filter::Images, Filter::Files, Filter::Links] {
+            let body = filter.empty_body(3);
+            assert!(body.contains("3 clips"), "{}: {body}", filter.label());
+            assert!(
+                !body.contains("Nothing copied yet"),
+                "{}: {body}",
+                filter.label()
+            );
+        }
+        assert_eq!(
+            Filter::Images.empty_body(1),
+            "Your only clip isn't an image. Copy a picture and it appears here."
+        );
+        assert!(Filter::Pinned.empty_body(3).contains("Ctrl P"));
+    }
+
+    #[test]
+    fn an_empty_history_and_a_filtered_empty_read_differently() {
+        let mut app = PasteboxApp::bare(Box::new(crate::DemoSource::hero()), 0);
+        assert!(!app.source.clips().is_empty(), "fixture has clips");
+        // Nothing is pinned in the fixture, so Pinned is a filter miss on a
+        // non-empty history — the case that used to say "Nothing copied yet".
+        app.filter = Filter::Pinned;
+        app.refresh();
+        assert!(app.matches.is_empty());
+        assert_eq!(app.filter.empty_title(), "Nothing pinned");
     }
 }
