@@ -1,0 +1,15 @@
+[package]
+name = "pastebox-platform"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# Win32 glue only: clipboard listener, global hotkey, foreground paste, tray.
+# Compiled for Windows targets only; the app must stay buildable elsewhere.
+
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
+
+[dependencies]
+pastebox-core = { path = "../core" }
