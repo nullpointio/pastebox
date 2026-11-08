@@ -1,0 +1,20 @@
+[package]
+name = "pastebox-platform"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# Win32 glue only: clipboard listener, global hotkey, foreground paste, tray.
+# Compiled for Windows targets only; the app must stay buildable elsewhere.
+
+[target.'cfg(windows)'.dependencies]
+# `Win32_Security` is required by CreateMutexW (the single-instance guard takes
+# SECURITY_ATTRIBUTES); `Win32_System_Ole` supplies the CF_* clipboard formats.
+windows-sys = { workspace = true, features = ["Win32_Security", "Win32_System_Ole"] }
+
+[dependencies]
+pastebox-core = { path = "../core" }
+# `LiveSource` implements the UI's ClipboardSource; the trait lives there, so
+# the platform depends on the renderer rather than the other way round.
+pastebox-ui = { path = "../ui" }

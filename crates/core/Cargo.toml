@@ -1,0 +1,10 @@
+[package]
+name = "pastebox-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# PURE RUST. No Win32, no egui, no I/O, no network refs.
+# Everything here must be unit-testable on any host.
+[dependencies]

@@ -1,0 +1,37 @@
+[workspace]
+resolver = "2"
+members = ["crates/core", "crates/platform", "crates/ui", "crates/app"]
+
+# On a non-Windows host only the pure core is built by default, so `cargo test` works
+# without an X11/GL toolchain. CI builds the Windows crates on windows-latest.
+default-members = ["crates/core"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+license = "MIT"
+authors = ["nullpointio"]
+repository = "https://github.com/nullpointio/pastebox"
+
+[workspace.dependencies]
+eframe = { version = "0.29", default-features = false, features = ["glow", "default_fonts"] }
+egui = "0.29"
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
+    "Win32_System_Threading",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_Shell",
+] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

@@ -1,0 +1,21 @@
+[package]
+name = "pastebox-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "pastebox"
+path = "src/main.rs"
+
+[dependencies]
+pastebox-core = { path = "../core" }
+pastebox-ui = { path = "../ui" }
+
+[target.'cfg(windows)'.dependencies]
+pastebox-platform = { path = "../platform" }
+
+[features]
+# Console subsystem so -selftest / -smoke can print on Windows CI.
+console = []
