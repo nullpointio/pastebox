@@ -1,5 +1,7 @@
 //! The clip model: kind, identity, and the two display strings the UI needs.
 
+use crate::image::ClipImage;
+
 /// Longest preview we keep for a row title, in characters (not bytes).
 pub const PREVIEW_MAX_CHARS: usize = 160;
 
@@ -61,7 +63,11 @@ pub struct ClipItem {
     pub preview: String,
     /// Absolute paths, in clipboard order, duplicates removed.
     pub files: Vec<String>,
-    /// Accounted size in bytes (decoded for images, UTF-8 length for text).
+    /// Encoded image payload plus thumbnail. `None` for every other kind, and
+    /// for an image whose pixels were never available.
+    pub image: Option<ClipImage>,
+    /// Accounted size in bytes: the encoded image, or the UTF-8 length of the
+    /// text body. This is what the row displays, not what the item costs.
     pub byte_len: usize,
     /// Unix epoch milliseconds, supplied by the caller so core has no clock.
     pub created_ms: u64,
@@ -97,10 +103,18 @@ impl ClipItem {
             text,
             preview,
             files,
+            image: None,
             byte_len,
             created_ms,
             pinned: false,
         }
+    }
+
+    /// Attach an image payload. The row title is separate (`with_preview`).
+    #[must_use]
+    pub fn with_image(mut self, image: ClipImage) -> Self {
+        self.image = Some(image);
+        self
     }
 
     /// Override the derived preview (images, and file clips with a nicer title).
@@ -114,6 +128,17 @@ impl ClipItem {
     pub fn with_pinned(mut self, pinned: bool) -> Self {
         self.pinned = pinned;
         self
+    }
+
+    /// Bytes this item holds in memory: the text body, the file paths and the
+    /// encoded image together with its thumbnail. The row's preview string and
+    /// the fixed struct overhead are small and ignored.
+    #[must_use]
+    pub fn payload_bytes(&self) -> usize {
+        let text = self.text.as_ref().map_or(0, String::len);
+        let files: usize = self.files.iter().map(String::len).sum();
+        let image = self.image.as_ref().map_or(0, ClipImage::retained_bytes);
+        text + files + image
     }
 
     /// `"text"`, `"image"`, `"files"`, `"link"`.
@@ -142,7 +167,12 @@ impl ClipItem {
                 let unit = if n == 1 { "file" } else { "files" };
                 format!("{} {} · {}", n, unit, format_bytes(self.byte_len))
             }
-            ClipKind::Image => match dims_from_preview(&self.preview) {
+            ClipKind::Image => match self
+                .image
+                .as_ref()
+                .map(ClipImage::dims)
+                .or_else(|| dims_from_preview(&self.preview))
+            {
                 Some((w, h)) => format!("image · {w}×{h}"),
                 None => format!("image · {}", format_bytes(self.byte_len)),
             },

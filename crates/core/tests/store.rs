@@ -1,7 +1,7 @@
 mod common;
 
 use common::{files_item, link_item, text_item};
-use pastebox_core::{ClipItem, ClipKind, Store, DEFAULT_CAPACITY};
+use pastebox_core::{ClipImage, ClipItem, ClipKind, Store, DEFAULT_CAPACITY, MAX_TEXT_BYTES};
 
 #[test]
 fn insert_assigns_increasing_ids() {
@@ -281,4 +281,103 @@ fn inserted_item_keeps_its_fields() {
     assert_eq!(row.created_ms, 1234);
     assert_eq!(row.files, vec!["C:\\a\\b.txt".to_string()]);
     assert_eq!(row.preview, "b.txt");
+}
+
+#[test]
+fn text_over_one_megabyte_is_truncated_on_the_way_in() {
+    let mut store = Store::new(10);
+    let body = "a".repeat(MAX_TEXT_BYTES + 5000);
+    let id = store.insert(text_item(&body, 1000));
+    let row = store.get(id).expect("stored");
+    let kept = row.text.as_deref().expect("text body");
+    assert_eq!(kept.len(), MAX_TEXT_BYTES);
+    assert!(row.payload_bytes() <= MAX_TEXT_BYTES);
+}
+
+#[test]
+fn a_multibyte_char_is_never_split_by_the_text_cap() {
+    let mut store = Store::new(10);
+    // U+00E9 is two bytes, so a cap landing mid-character must step back to it.
+    let body = "\u{e9}".repeat(MAX_TEXT_BYTES / 2 + 10);
+    let id = store.insert(text_item(&body, 1000));
+    let kept = store
+        .get(id)
+        .and_then(|r| r.text.clone())
+        .expect("text body");
+    assert!(kept.len() <= MAX_TEXT_BYTES);
+    assert!(kept.chars().all(|c| c == '\u{e9}'));
+}
+
+/// A budget evicts the oldest unpinned rows, not just the oldest rows.
+#[test]
+fn the_byte_budget_evicts_the_oldest_unpinned_rows() {
+    let mut store = Store::with_budget(100, 2400);
+    store.insert(text_item(&"a".repeat(1000), 1000));
+    store.insert(text_item(&"b".repeat(1000), 2000));
+    store.insert(text_item(&"c".repeat(1000), 3000));
+    // 3000 bytes cannot fit in 2400, so the oldest row is already gone.
+    assert_eq!(store.len(), 2);
+    assert!(store.payload_bytes() <= 2400);
+    // The budget keeps holding as new rows arrive: oldest first, pins last.
+    store.insert(text_item(&"d".repeat(1000), 4000));
+    assert!(store.payload_bytes() <= 2400);
+    let previews: Vec<&str> = store.items().iter().map(|i| i.preview.as_str()).collect();
+    assert_eq!(previews.len(), 2);
+    assert!(previews[0].starts_with('d'));
+}
+
+#[test]
+fn the_byte_budget_never_evicts_a_pin() {
+    let mut store = Store::with_budget(100, 1500);
+    let pinned = store.insert(text_item(&"p".repeat(1000), 1000).with_pinned(true));
+    store.insert(text_item(&"u".repeat(1000), 2000));
+    assert_eq!(store.len(), 1);
+    assert_eq!(store.items()[0].id, pinned);
+    assert_eq!(store.payload_bytes(), 1000);
+}
+
+#[test]
+fn payload_bytes_counts_text_files_and_images() {
+    let mut store = Store::new(10);
+    store.insert(text_item("hello", 1000));
+    assert_eq!(store.payload_bytes(), 5);
+    store.insert(ClipItem::new(
+        ClipKind::Files,
+        None,
+        vec!["C:\\one.txt".to_string(), "C:\\two.txt".to_string()],
+        0,
+        2000,
+    ));
+    assert_eq!(store.payload_bytes(), 5 + 10 + 10);
+
+    let image = small_image();
+    let item = ClipItem::new(ClipKind::Image, None, Vec::new(), image.encoded_len(), 3000)
+        .with_preview("Image 32\u{d7}24")
+        .with_image(image);
+    let id = store.insert(item);
+    let row = store.get(id).expect("image row");
+    let retained = row.image.as_ref().expect("payload").retained_bytes();
+    assert!(retained > 0);
+    assert_eq!(store.payload_bytes(), 25 + retained);
+    // The row's displayed size is the encoded size, not the raw pixels.
+    assert_eq!(
+        row.byte_len,
+        retained - row.image.as_ref().expect("payload").thumb().bytes()
+    );
+}
+
+/// A 32 x 24 32-bit DIB, encoded the way the clipboard listener does it.
+fn small_image() -> ClipImage {
+    let (w, h) = (32u32, 24u32);
+    let stride = w as usize * 4;
+    let mut dib = vec![0u8; 40 + stride * h as usize];
+    dib[0..4].copy_from_slice(&40u32.to_le_bytes());
+    dib[4..8].copy_from_slice(&(w as i32).to_le_bytes());
+    dib[8..12].copy_from_slice(&(h as i32).to_le_bytes());
+    dib[12..14].copy_from_slice(&1u16.to_le_bytes());
+    dib[14..16].copy_from_slice(&32u16.to_le_bytes());
+    for (i, byte) in dib[40..].iter_mut().enumerate() {
+        *byte = (i % 251) as u8;
+    }
+    ClipImage::from_dib(&dib).expect("a plain 32-bit DIB")
 }

@@ -8,3 +8,7 @@ license.workspace = true
 # PURE RUST. No Win32, no egui, no I/O, no network refs.
 # Everything here must be unit-testable on any host.
 [dependencies]
+# Image payloads are stored encoded (PNG), which is what keeps a 4K screenshot
+# at a few megabytes instead of the ~33 MB its raw DIB costs. Pure Rust,
+# MIT/Apache-2.0, already in the lock graph via egui's image support.
+png = "0.18"
