@@ -1,0 +1,5 @@
+// The application icon. The `ICON` keyword (rather than a numeric RT_GROUP_ICON
+// id) is what makes the resource compiler unpack the .ico into one RT_ICON per
+// frame plus the RT_GROUP_ICON directory that Explorer reads. Id 1 is also the
+// id the Win32 code loads at runtime (the tray, via LoadImageW).
+1 ICON "icon.ico"

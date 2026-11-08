@@ -4,14 +4,16 @@ use std::mem::size_of;
 use std::ptr;
 
 use windows_sys::Win32::Foundation::{HWND, POINT};
+use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Shell::{
     Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY,
     NOTIFYICONDATAW,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, LoadIconW, PostMessageW,
-    SetForegroundWindow, TrackPopupMenu, IDI_APPLICATION, MF_SEPARATOR, MF_STRING, TPM_NONOTIFY,
-    TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_APP, WM_NULL,
+    AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, GetSystemMetrics, LoadImageW,
+    PostMessageW, SetForegroundWindow, TrackPopupMenu, HICON, IMAGE_ICON, LR_DEFAULTCOLOR,
+    MF_SEPARATOR, MF_STRING, SM_CXSMICON, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_APP,
+    WM_NULL,
 };
 
 use crate::wide::to_wide_buf;
@@ -51,6 +53,25 @@ impl TrayCommand {
     }
 }
 
+/// The app icon embedded in the executable at build time, sized for the
+/// notification area. Resource id 1 is the `RT_GROUP_ICON` declared in
+/// `assets/pastebox.rc`; Windows picks the frame that fits.
+fn app_icon() -> HICON {
+    // SAFETY: a null module handle means "this executable"; the id and flags are
+    // the documented ones and the returned handle is only read by Shell_NotifyIconW.
+    unsafe {
+        let size = GetSystemMetrics(SM_CXSMICON);
+        LoadImageW(
+            GetModuleHandleW(ptr::null()),
+            1 as *const u16,
+            IMAGE_ICON,
+            size,
+            size,
+            LR_DEFAULTCOLOR,
+        )
+    }
+}
+
 pub struct Tray {
     data: NOTIFYICONDATAW,
     added: bool,
@@ -69,9 +90,10 @@ impl Tray {
         data.uID = TRAY_ID;
         data.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
         data.uCallbackMessage = TRAY_MSG;
-        // SAFETY: IDI_APPLICATION is a system resource; a null module means
-        // "look in the system image".
-        data.hIcon = unsafe { LoadIconW(ptr::null_mut(), IDI_APPLICATION) };
+        // `app_icon` loads our own compiled-in icon (resource id 1 in
+        // assets/pastebox.rc) at the small-icon metric, so the tray matches the
+        // title bar and taskbar.
+        data.hIcon = app_icon();
         if data.hIcon.is_null() {
             return None;
         }

@@ -78,6 +78,20 @@ pub trait ClipboardSource {
     }
 }
 
+/// The window/taskbar icon, decoded once from the PNG that `assets/icon.svg`
+/// is rasterized to. The same artwork is compiled into the .exe by
+/// `crates/app/build.rs`, so title bar, taskbar and tray all agree.
+///
+/// # Panics
+/// If `assets/icon-64.png` is missing or not a PNG. That is a packaging bug,
+/// not a runtime condition, and it would otherwise ship an iconless window.
+fn window_icon() -> std::sync::Arc<egui::IconData> {
+    std::sync::Arc::new(
+        eframe::icon_data::from_png_bytes(include_bytes!("../../../assets/icon-64.png"))
+            .expect("assets/icon-64.png is a valid PNG"),
+    )
+}
+
 /// Ask the surface to repaint. Cheap, thread-safe, never blocks.
 pub type Waker = Box<dyn Fn() + Send + Sync>;
 
@@ -104,7 +118,8 @@ where
             .with_min_inner_size([760.0, 440.0])
             .with_decorations(false)
             .with_transparent(true)
-            .with_title("Pastebox"),
+            .with_title("Pastebox")
+            .with_icon(window_icon()),
         ..Default::default()
     };
     eframe::run_native(
@@ -131,7 +146,8 @@ pub fn run_demo() -> eframe::Result<()> {
             .with_min_inner_size([760.0, 440.0])
             .with_decorations(false)
             .with_transparent(true)
-            .with_title("Pastebox"),
+            .with_title("Pastebox")
+            .with_icon(window_icon()),
         ..Default::default()
     };
     eframe::run_native(

@@ -1,0 +1,19 @@
+<!-- Pastebox app icon — 64x64 master.
+   Metaphor: a clipboard with a stacked page edge (history of pages).
+   Flat shapes only so every edge stays crisp at 16 px. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 64 64">
+  <rect x="0" y="0" width="64" height="64" rx="14.5" fill="#191326"/>
+
+  <!-- the page underneath: the history stack -->
+  <rect x="19" y="13" width="31" height="37" rx="4.5" fill="#5B4B8C"/>
+
+  <!-- the current page -->
+  <rect x="13" y="11" width="31" height="42" rx="4.5" fill="#FBFCFF"/>
+
+  <!-- clip -->
+  <rect x="21" y="6.5" width="15" height="8.5" rx="3" fill="#8E6BFF"/>
+
+  <!-- text lines: texture at large sizes, a clean bar at 16 px -->
+  <rect x="19" y="24" width="17" height="3.6" rx="1.8" fill="#9AA1D6"/>
+  <rect x="19" y="33.5" width="13" height="3.6" rx="1.8" fill="#9AA1D6"/>
+</svg>
