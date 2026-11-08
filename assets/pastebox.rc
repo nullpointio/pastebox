@@ -1,5 +1,46 @@
+// Win32 resources for Pastebox.exe, compiled by crates/app/build.rs with
+// windres (*-windows-gnu) or rc.exe (*-msvc). Both read this file from assets/
+// via -I.
+//
+// code_page(65001) is what lets rc.exe read this file as UTF-8; windres does so
+// by default. Keep the file UTF-8 without a BOM.
+#pragma code_page(65001)
+
 // The application icon. The `ICON` keyword (rather than a numeric RT_GROUP_ICON
 // id) is what makes the resource compiler unpack the .ico into one RT_ICON per
 // frame plus the RT_GROUP_ICON directory that Explorer reads. Id 1 is also the
 // id the Win32 code loads at runtime (the tray, via LoadImageW).
 1 ICON "icon.ico"
+
+// Version stamp read by Task Manager's Description column, Explorer's Details
+// tab and `(Get-Item .\Pastebox.exe).VersionInfo`. Keep every version field in
+// sync with [workspace.package] version in Cargo.toml.
+1 VERSIONINFO
+FILEVERSION 1,0,2,0
+PRODUCTVERSION 1,0,2,0
+FILEFLAGSMASK 0x3fL
+FILEFLAGS 0x0L
+FILEOS 0x40004L
+FILETYPE 0x1L
+FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "CompanyName", "nullpointio"
+            VALUE "FileDescription", "Clipboard history with instant search"
+            VALUE "FileVersion", "1.0.2.0"
+            VALUE "InternalName", "pastebox"
+            VALUE "LegalCopyright", "MIT License — nullpointio"
+            VALUE "OriginalFilename", "Pastebox.exe"
+            VALUE "ProductName", "Pastebox"
+            VALUE "ProductVersion", "1.0.2.0"
+            VALUE "Comments", "Pinned items persist; everything else stays in memory."
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

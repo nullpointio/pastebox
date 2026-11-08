@@ -1,9 +1,19 @@
-# Pastebox v1.0.1 — application icon
+# Pastebox v1.0.2 — version info in the exe
 
 **A clipboard history that opens instantly, searches properly, and remembers nothing you didn't pin.**
 
 Press `Win+Alt+V` → a quiet panel over whatever you're doing → type three letters → Enter → pasted.
 Offline, no account, ~3 MB, no installer.
+
+## What changed in 1.0.2
+
+- The exe now carries a PE `VERSIONINFO` resource, so Task Manager's **Description** column and
+  Explorer's Details tab show a product name and version instead of `Pastebox.ex…`.
+- Fields: `CompanyName=nullpointio`, `ProductName=Pastebox`, `FileDescription=Clipboard history with
+  instant search`, `FileVersion`/`ProductVersion=1.0.2.0`, `OriginalFilename=Pastebox.exe`,
+  `LegalCopyright=MIT License — nullpointio`.
+- Compiled into the same resource object as the icon; `-version` still reports the workspace version,
+  which now matches. No behaviour change.
 
 ## Downloads
 
