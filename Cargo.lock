@@ -1470,7 +1470,7 @@ dependencies = [
 
 [[package]]
 name = "pastebox-app"
-version = "0.1.0"
+version = "1.0.2"
 dependencies = [
  "pastebox-core",
  "pastebox-platform",
@@ -1479,11 +1479,11 @@ dependencies = [
 
 [[package]]
 name = "pastebox-core"
-version = "0.1.0"
+version = "1.0.2"
 
 [[package]]
 name = "pastebox-platform"
-version = "0.1.0"
+version = "1.0.2"
 dependencies = [
  "pastebox-core",
  "pastebox-ui",
@@ -1492,7 +1492,7 @@ dependencies = [
 
 [[package]]
 name = "pastebox-ui"
-version = "0.1.0"
+version = "1.0.2"
 dependencies = [
  "eframe",
  "egui",
