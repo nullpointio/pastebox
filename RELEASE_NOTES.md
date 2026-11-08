@@ -1,4 +1,4 @@
-# Pastebox v1.0.0
+# Pastebox v1.0.1 — application icon
 
 **A clipboard history that opens instantly, searches properly, and remembers nothing you didn't pin.**
 
