@@ -39,11 +39,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
-      - name: Clippy (everything, incl. Win32 and UI)
-        run: cargo clippy --all-targets -- -D warnings
+      - name: Clippy (whole workspace, incl. Win32 and UI)
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
-      - name: Tests (core + UI)
-        run: cargo test -p pastebox-core -p pastebox-ui --release
+      - name: Tests (whole workspace)
+        run: cargo test --workspace --release
 
       - name: Build console variant and run smoke + selftest
         shell: pwsh
