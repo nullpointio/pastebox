@@ -16,7 +16,7 @@
 // tab and `(Get-Item .\Pastebox.exe).VersionInfo`. Keep every version field in
 // sync with [workspace.package] version in Cargo.toml.
 1 VERSIONINFO
-FILEVERSION 1,0,2,0
+FILEVERSION 1,0,3,0
 PRODUCTVERSION 1,0,2,0
 FILEFLAGSMASK 0x3fL
 FILEFLAGS 0x0L
@@ -30,12 +30,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "nullpointio"
             VALUE "FileDescription", "Clipboard history with instant search"
-            VALUE "FileVersion", "1.0.2.0"
+            VALUE "FileVersion", "1.0.3.0"
             VALUE "InternalName", "pastebox"
             VALUE "LegalCopyright", "MIT License — nullpointio"
             VALUE "OriginalFilename", "Pastebox.exe"
             VALUE "ProductName", "Pastebox"
-            VALUE "ProductVersion", "1.0.2.0"
+            VALUE "ProductVersion", "1.0.3.0"
             VALUE "Comments", "Pinned items persist; everything else stays in memory."
         END
     END

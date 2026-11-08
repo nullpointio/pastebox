@@ -4,8 +4,11 @@
 //! only real egui widgets are the search field and the hit-test rectangles, so
 //! no default widget chrome can leak into the composition (PRD UI-05).
 
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
+
 use egui::{Align2, Color32, FontId, Id, Pos2, Rect, Rounding, Sense, Shape, Stroke, Ui, Vec2};
-use pastebox_core::{ClipItem, ClipKind};
+use pastebox_core::{ClipImage, ClipItem, ClipKind};
 
 use crate::format::{self, truncate_to_width};
 use crate::icons::{self, Icon};
@@ -193,6 +196,12 @@ pub struct PasteboxApp {
     action: Option<Action>,
     last_query: String,
     time: f64,
+    /// Row thumbnails uploaded to the GPU, keyed by clip id. Only the rows in
+    /// the viewport keep a texture; everything else is freed each frame.
+    thumbs: RefCell<ThumbCache>,
+    /// The one full-size preview texture. Replaced (and the old one freed)
+    /// whenever the selection changes.
+    preview_tex: RefCell<Option<(u64, egui::TextureHandle)>>,
 }
 
 impl PasteboxApp {
@@ -227,6 +236,8 @@ impl PasteboxApp {
             action: None,
             last_query: String::new(),
             time: 0.0,
+            thumbs: RefCell::new(ThumbCache::default()),
+            preview_tex: RefCell::new(None),
         };
         app.refresh();
         app
@@ -608,6 +619,9 @@ impl PasteboxApp {
         let filter_now = self.filter;
         let clips = self.source.clips();
         let mut need_refresh = false;
+        // Ids whose row thumbnail stays resident this frame. Anything not in
+        // here loses its GPU texture at the end of `paint`.
+        let mut onscreen: HashSet<u64> = HashSet::new();
 
         if matches.is_empty() {
             // Empty states own the whole content width — no preview pane and no
@@ -647,6 +661,7 @@ impl PasteboxApp {
                 let resp = ui.interact(row, Id::new(("row", clip.id)), Sense::click());
                 let hovered = resp.hovered();
 
+                onscreen.insert(clip.id);
                 paint_row(
                     &clip_list,
                     &pal,
@@ -656,6 +671,8 @@ impl PasteboxApp {
                     selected,
                     hovered,
                     self.now_ms,
+                    &self.thumbs,
+                    ui.ctx(),
                 );
 
                 if resp.clicked() {
@@ -699,6 +716,12 @@ impl PasteboxApp {
                 self.visible_rows,
             );
         }
+
+        // Atlas hygiene: a scrolled-away row has no reason to keep a GL
+        // texture. Dropping the handle frees it immediately, so the resident
+        // set is always "the rows you can see", not "every image you scrolled
+        // past".
+        self.thumbs.borrow_mut().retain(&onscreen);
 
         if preview && !matches.is_empty() {
             let div_x = panel.left() + list_w;
@@ -853,7 +876,9 @@ impl PasteboxApp {
             Pos2::new(x, body_top),
             Pos2::new(x + width, buttons_top - 16.0),
         );
-        paint_preview_body(painter, pal, clip, &meta, body);
+        // Only the selected row ever gets its full pixels decoded.
+        let preview_texture = self.preview_texture(ui.ctx(), clip);
+        paint_preview_body(painter, pal, clip, &meta, body, preview_texture);
 
         // Primary and secondary actions.
         let paste = Rect::from_min_size(Pos2::new(x, buttons_top), Vec2::new(72.0, BUTTON_H));
@@ -914,6 +939,34 @@ impl PasteboxApp {
             });
         }
         None
+    }
+
+    /// The selected image decoded into a GPU texture, at most one at a time.
+    ///
+    /// The previous selection's texture is dropped here, so switching rows frees
+    /// the old image's pixels instead of accumulating them. Falls back to the
+    /// row thumbnail when the payload was dropped for size.
+    fn preview_texture(&self, ctx: &egui::Context, clip: &ClipItem) -> Option<egui::TextureId> {
+        let image = clip.image.as_ref()?;
+        if !image.has_payload() {
+            return self.thumbs.borrow_mut().get(ctx, clip);
+        }
+        let mut slot = self.preview_tex.borrow_mut();
+        if let Some((id, handle)) = slot.as_ref() {
+            if *id == clip.id {
+                return Some(handle.id());
+            }
+        }
+        let (w, h, rgba) = image.decode_rgba()?;
+        let color = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba);
+        let handle = ctx.load_texture(
+            format!("pastebox-preview-{}", clip.id),
+            color,
+            egui::TextureOptions::LINEAR,
+        );
+        let id = handle.id();
+        *slot = Some((clip.id, handle));
+        Some(id)
     }
 
     fn paint_footer(&self, painter: &egui::Painter, pal: &Palette, panel: Rect) {
@@ -988,6 +1041,100 @@ impl PasteboxApp {
     }
 }
 
+/// Row thumbnails resident on the GPU, keyed by clip id.
+///
+/// The cache holds only what the viewport is showing: [`ThumbCache::retain`] is
+/// called once per frame with the visible ids, and any other texture handle is
+/// dropped — which frees the GL texture and its CPU-side upload immediately.
+#[derive(Default)]
+struct ThumbCache {
+    textures: HashMap<u64, egui::TextureHandle>,
+}
+
+impl ThumbCache {
+    /// The texture for `clip`'s thumbnail, uploading it on first sight.
+    fn get(&mut self, ctx: &egui::Context, clip: &ClipItem) -> Option<egui::TextureId> {
+        let image = clip.image.as_ref()?;
+        if let Some(handle) = self.textures.get(&clip.id) {
+            return Some(handle.id());
+        }
+        let thumb = image.thumb();
+        if thumb.width() == 0 || thumb.height() == 0 {
+            return None;
+        }
+        let color = egui::ColorImage::from_rgba_unmultiplied(
+            [thumb.width() as usize, thumb.height() as usize],
+            thumb.rgba(),
+        );
+        let handle = ctx.load_texture(
+            format!("pastebox-thumb-{}", clip.id),
+            color,
+            egui::TextureOptions::LINEAR,
+        );
+        let id = handle.id();
+        self.textures.insert(clip.id, handle);
+        Some(id)
+    }
+
+    /// Drop every texture whose row is no longer on screen.
+    fn retain(&mut self, onscreen: &HashSet<u64>) {
+        self.textures.retain(|id, _| onscreen.contains(id));
+    }
+}
+
+/// Pixel dimensions of an image row, falling back to the parsed title so the
+/// aspect ratio is still sane when the payload was dropped.
+fn image_dims(clip: &ClipItem) -> (u32, u32) {
+    clip.image
+        .as_ref()
+        .map(ClipImage::dims)
+        .or_else(|| format::image_dims(&clip.preview))
+        .filter(|(w, h)| *w > 0 && *h > 0)
+        .unwrap_or((1, 1))
+}
+
+/// Draw `texture` into `area`, cropping to fill it (thumbnails).
+fn paint_image_cover(
+    painter: &egui::Painter,
+    texture: egui::TextureId,
+    area: Rect,
+    dims: (u32, u32),
+) {
+    let (w, h) = (dims.0 as f32, dims.1 as f32);
+    let scale = (area.width() / w).max(area.height() / h);
+    let size = Vec2::new(w * scale, h * scale);
+    let full = Rect::from_center_size(area.center(), size);
+    // UV window that maps `area` onto the centre of the image.
+    let u0 = ((full.width() - area.width()) / 2.0) / full.width();
+    let v0 = ((full.height() - area.height()) / 2.0) / full.height();
+    let u1 = u0 + area.width() / full.width();
+    let v1 = v0 + area.height() / full.height();
+    painter.image(
+        texture,
+        area,
+        Rect::from_min_max(Pos2::new(u0, v0), Pos2::new(u1, v1)),
+        Color32::WHITE,
+    );
+}
+
+/// Draw `texture` inside `area`, letterboxed (preview pane).
+fn paint_image_fit(
+    painter: &egui::Painter,
+    texture: egui::TextureId,
+    area: Rect,
+    dims: (u32, u32),
+) {
+    let (w, h) = (dims.0 as f32, dims.1 as f32);
+    let scale = (area.width() / w).min(area.height() / h);
+    let size = Vec2::new(w * scale, h * scale);
+    painter.image(
+        texture,
+        Rect::from_center_size(area.center(), size),
+        Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+        Color32::WHITE,
+    );
+}
+
 /// One row: plate, accent bar, glyph, title, meta, age.
 #[allow(clippy::too_many_arguments)]
 fn paint_row(
@@ -999,6 +1146,8 @@ fn paint_row(
     selected: bool,
     hovered: bool,
     now_ms: u64,
+    thumbs: &RefCell<ThumbCache>,
+    ctx: &egui::Context,
 ) {
     if selected {
         let plate = Rect::from_min_max(row.min, Pos2::new(row.right() - 8.0, row.bottom()));
@@ -1042,7 +1191,7 @@ fn paint_row(
         .x;
     let columns = layout::row_columns(row, age_w);
 
-    paint_kind_glyph(painter, pal, clip, columns.icon);
+    paint_kind_glyph(painter, pal, clip, columns.icon, thumbs, ctx);
 
     let title_font = tokens::ui(type_size::ROW_TITLE);
     let title = truncate_to_width(&clip.preview, columns.text.width(), |s| {
@@ -1114,20 +1263,34 @@ fn paint_row(
     }
 }
 
-fn paint_kind_glyph(painter: &egui::Painter, pal: &Palette, clip: &ClipItem, rect: Rect) {
+fn paint_kind_glyph(
+    painter: &egui::Painter,
+    pal: &Palette,
+    clip: &ClipItem,
+    rect: Rect,
+    thumbs: &RefCell<ThumbCache>,
+    ctx: &egui::Context,
+) {
     if clip.kind == ClipKind::Image {
         let thumb = Rect::from_min_size(
             Pos2::new(rect.left() - 7.0, rect.top() - 7.0),
             Vec2::new(32.0, 32.0),
         );
         painter.rect_filled(thumb, Rounding::same(radius::CHIP), pal.thumb);
+        // The row shows the picture itself when we have a thumbnail: it is the
+        // cheapest way to tell two screenshots apart.
+        if let Some(texture) = thumbs.borrow_mut().get(ctx, clip) {
+            let inner = thumb.shrink(2.0);
+            paint_image_cover(painter, texture, inner, image_dims(clip));
+        } else {
+            let inner = Rect::from_center_size(thumb.center(), Vec2::splat(18.0));
+            icons::paint(painter, Icon::Image, inner, pal.kind_image);
+        }
         painter.rect_stroke(
             thumb,
             Rounding::same(radius::CHIP),
             Stroke::new(1.0_f32, pal.hairline),
         );
-        let inner = Rect::from_center_size(thumb.center(), Vec2::splat(18.0));
-        icons::paint(painter, Icon::Image, inner, pal.kind_image);
         return;
     }
 
@@ -1165,6 +1328,7 @@ fn paint_preview_body(
     clip: &ClipItem,
     meta: &ClipMeta,
     body: Rect,
+    preview_texture: Option<egui::TextureId>,
 ) {
     match clip.kind {
         ClipKind::Image => {
@@ -1176,15 +1340,29 @@ fn paint_preview_body(
                 Rounding::same(radius::CHIP),
                 Stroke::new(1.0_f32, pal.hairline),
             );
-            // No pixels to show: a centred glyph plus the decoded dimensions
-            // reads as a deliberate placeholder, not a missing image.
-            icons::paint(
-                painter,
-                Icon::Image,
-                Rect::from_center_size(plate.center() - Vec2::new(0.0, 10.0), Vec2::splat(28.0)),
-                pal.text_tertiary,
-            );
-            let caption = match meta.dims {
+            match preview_texture {
+                Some(texture) => {
+                    paint_image_fit(painter, texture, plate.shrink(8.0), image_dims(clip));
+                }
+                // No pixels to show: a centred glyph plus the decoded
+                // dimensions reads as a deliberate placeholder, not a missing
+                // image.
+                None => {
+                    icons::paint(
+                        painter,
+                        Icon::Image,
+                        Rect::from_center_size(
+                            plate.center() - Vec2::new(0.0, 10.0),
+                            Vec2::splat(28.0),
+                        ),
+                        pal.text_tertiary,
+                    );
+                }
+            }
+            let caption = match meta
+                .dims
+                .or_else(|| clip.image.as_ref().map(ClipImage::dims))
+            {
                 Some((w, h)) => format!("{w} × {h}"),
                 None => format::detail(clip, meta.dims),
             };

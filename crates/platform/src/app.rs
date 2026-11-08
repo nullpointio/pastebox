@@ -31,7 +31,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WM_TIMER, WNDCLASSW,
 };
 
-use crate::clipboard::{self, ImageCache, Previous};
+use crate::clipboard::{self, Previous};
 use crate::hotkey::{self, Registered};
 use crate::single::{GuardError, SingleInstance};
 use crate::tray::{Tray, TrayCommand};
@@ -261,7 +261,6 @@ pub struct Platform {
     tray: Option<Tray>,
     store: Store,
     pins_path: PathBuf,
-    images: ImageCache,
     paused: bool,
     /// Sequence number of the clipboard write we caused and must not re-capture.
     ignore_seq: Option<u32>,
@@ -298,7 +297,6 @@ impl Platform {
             tray,
             store,
             pins_path: config.pins_path,
-            images: ImageCache::default(),
             paused: false,
             ignore_seq: None,
             last_seq: clipboard::sequence(),
@@ -341,14 +339,12 @@ impl Platform {
     /// Delete one row and persist the pins file.
     pub fn remove(&mut self, id: u64) -> io::Result<()> {
         self.store.remove(id);
-        self.images.forget(id);
         self.persist_pins()
     }
 
     /// Drop every unpinned row and persist.
     pub fn clear_unpinned(&mut self) -> io::Result<()> {
         self.store.clear_unpinned();
-        self.images = ImageCache::default();
         self.persist_pins()
     }
 
@@ -384,14 +380,21 @@ impl Platform {
     /// Write one clip to the clipboard. Returns the content it displaced, or
     /// `None` when nothing could be written.
     fn write_item(&mut self, id: u64) -> Option<Previous> {
-        let item = self.store.get(id)?.clone();
+        // Borrow the row instead of cloning it: an image payload can be
+        // megabytes, and copying it just to write it out is pure waste.
+        let item = self.store.get(id)?;
         let previous = clipboard::capture_previous();
         let wrote = match item.kind {
             ClipKind::Text | ClipKind::Link => {
                 item.text.as_deref().is_some_and(clipboard::write_text)
             }
             ClipKind::Files => clipboard::write_files(&item.files),
-            ClipKind::Image => self.images.get(id).is_some_and(clipboard::write_image),
+            // Decoded on demand: the encoded bytes are the only copy we hold.
+            ClipKind::Image => item
+                .image
+                .as_ref()
+                .and_then(pastebox_core::ClipImage::to_dib)
+                .is_some_and(|dib| clipboard::write_image(&dib)),
         };
         if !wrote {
             return None;
@@ -524,11 +527,9 @@ impl Platform {
         if self.ignore_seq.take() == Some(seq) {
             return None;
         }
-        let captured = clipboard::capture(now_ms())?;
-        let id = self.store.insert(captured.item);
-        if let Some(bytes) = captured.image {
-            self.images.put(id, bytes);
-        }
+        // The captured row carries its image payload already encoded.
+        let item = clipboard::capture(now_ms())?;
+        let id = self.store.insert(item);
         Some(Event::ClipCaptured(id))
     }
 }
@@ -586,8 +587,59 @@ pub fn smoke() -> bool {
     let mut ok = true;
     ok &= smoke_hotkey();
     ok &= smoke_clipboard();
+    ok &= smoke_image();
     ok &= smoke_single_instance();
     let _ = smoke_tray();
+    ok
+}
+
+/// A `width × height` 32-bit bottom-up DIB, the shape the clipboard hands over.
+fn smoke_dib(width: u32, height: u32) -> Vec<u8> {
+    let stride = width as usize * 4;
+    let mut dib = vec![0u8; 40 + stride * height as usize];
+    dib[0..4].copy_from_slice(&40u32.to_le_bytes());
+    dib[4..8].copy_from_slice(&(width as i32).to_le_bytes());
+    dib[8..12].copy_from_slice(&(height as i32).to_le_bytes());
+    dib[12..14].copy_from_slice(&1u16.to_le_bytes());
+    dib[14..16].copy_from_slice(&32u16.to_le_bytes());
+    for (i, byte) in dib[40..].iter_mut().enumerate() {
+        *byte = if i % 4 == 3 { 0xFF } else { (i % 200) as u8 };
+    }
+    dib
+}
+
+/// Capture an image: the DIB on the clipboard must come back as an encoded
+/// payload with a thumbnail, and convert back into a DIB of the same size.
+fn smoke_image() -> bool {
+    let (w, h) = (64u32, 48u32);
+    let dib = smoke_dib(w, h);
+    let previous = clipboard::capture_previous();
+    if !clipboard::write_image(&dib) {
+        println!("FAIL image: could not put a DIB on the clipboard");
+        return false;
+    }
+    let captured = clipboard::capture(0);
+    let image = captured.as_ref().and_then(|item| item.image.as_ref());
+    let dims_ok = image.is_some_and(|image| image.dims() == (w, h));
+    let encoded = image.map_or(0, pastebox_core::ClipImage::encoded_len);
+    let tiny = encoded > 0 && encoded < dib.len();
+    let thumbnail = image.is_some_and(|image| image.thumb().width() > 0);
+    let back = image
+        .and_then(pastebox_core::ClipImage::to_dib)
+        .is_some_and(|back| back.len() == dib.len());
+    let restored = previous.restore();
+    let ok = dims_ok && tiny && thumbnail && back && restored;
+    if ok {
+        println!(
+            "PASS image: {w}×{h} DIB -> {} B encoded (from {} B) -> DIB round trip",
+            encoded,
+            dib.len()
+        );
+    } else {
+        println!(
+            "FAIL image: dims={dims_ok} encoded={encoded} thumbnail={thumbnail} round_trip={back} restored={restored}"
+        );
+    }
     ok
 }
 
@@ -611,7 +663,7 @@ fn smoke_clipboard() -> bool {
         println!("FAIL clipboard: write failed");
         return false;
     }
-    let read_back = clipboard::capture(0).and_then(|captured| captured.item.text);
+    let read_back = clipboard::capture(0).and_then(|item| item.text);
     let matched = read_back.as_deref() == Some(probe.as_str());
     if matched {
         println!("PASS clipboard: text round trip ({} chars)", probe.len());

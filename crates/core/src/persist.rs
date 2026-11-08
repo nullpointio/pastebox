@@ -144,6 +144,9 @@ fn decode_record(line: &str) -> Option<ClipItem> {
         text,
         preview,
         files,
+        // Pins are text, links and file names; pixel data is never written to
+        // the pins file, so a restored pin has no payload.
+        image: None,
         byte_len,
         created_ms,
         pinned,

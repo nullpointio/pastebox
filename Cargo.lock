@@ -1475,11 +1475,15 @@ dependencies = [
  "pastebox-core",
  "pastebox-platform",
  "pastebox-ui",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
 name = "pastebox-core"
 version = "1.0.2"
+dependencies = [
+ "png",
+]
 
 [[package]]
 name = "pastebox-platform"

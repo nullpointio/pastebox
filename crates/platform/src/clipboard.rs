@@ -1,9 +1,10 @@
 //! Clipboard read/write.
 //!
 //! Reads `CF_UNICODETEXT`, `CF_HDROP` (file lists) and `CF_DIB` / `CF_DIBV5` /
-//! `PNG`. Images are never decoded: only the header is parsed for the pixel
-//! dimensions, and the raw block is kept aside (bounded, in memory only) so the
-//! item can be put back on the clipboard later.
+//! `PNG`. Images are re-encoded once, on capture: the raw block is converted
+//! into the encoded payload the model keeps (see `pastebox_core::ClipImage`), so
+//! a 33 MB screenshot costs a few megabytes for the rest of its life. The raw
+//! block itself is never stored.
 //!
 //! Every read copies out of the clipboard's `HGLOBAL` and releases the lock
 //! before the clipboard is closed; the clipboard owns its handles, so nothing
@@ -14,7 +15,7 @@ use std::ptr;
 use std::thread;
 use std::time::Duration;
 
-use pastebox_core::{ClipItem, ClipKind};
+use pastebox_core::{ClipImage, ClipItem, ClipKind};
 use windows_sys::Win32::Foundation::{GlobalFree, HANDLE, POINT};
 use windows_sys::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, GetClipboardData, GetClipboardSequenceNumber,
@@ -31,8 +32,11 @@ use crate::wide::from_wide;
 /// Largest text clip we keep (UTF-16 units). Anything bigger is ignored rather
 /// than half-stored; the product never promises to hold a novel.
 const MAX_TEXT_UNITS: usize = 2 * 1024 * 1024;
-/// Largest raw image block we keep for paste-back.
-const MAX_IMAGE_BYTES: usize = 32 * 1024 * 1024;
+/// Largest raw image block we are willing to copy out of the clipboard for one
+/// capture. This bounds the *transient* read: the block is converted to encoded
+/// bytes immediately and then freed. 64 MiB covers a 5K screenshot with room to
+/// spare; anything larger is refused rather than spiking memory.
+const MAX_CAPTURE_IMAGE_BYTES: usize = 64 * 1024 * 1024;
 /// Largest image we are willing to snapshot for clipboard restoration.
 const MAX_SNAPSHOT_IMAGE_BYTES: usize = 8 * 1024 * 1024;
 /// Upper bound on files taken from one `CF_HDROP`.
@@ -76,12 +80,9 @@ fn owner_excludes_history() -> bool {
     unsafe { IsClipboardFormatAvailable(id) != 0 }
 }
 
-/// A clipboard read that produced a row, plus the raw image bytes (if any) that
-/// the model deliberately does not carry.
-pub struct Captured {
-    pub item: ClipItem,
-    pub image: Option<Vec<u8>>,
-}
+/// A clipboard read that produced a row. Image pixels travel inside the item
+/// (`ClipItem::image`), re-encoded, so there is no side cache to keep in step.
+pub type Captured = ClipItem;
 
 /// Keeps the clipboard open for the duration of a read/write and always closes
 /// it, including on early return.
@@ -257,21 +258,41 @@ unsafe fn read_image(now_ms: u64) -> Option<Captured> {
         // SAFETY: the clipboard is open; a missing format yields a null handle.
         let handle = unsafe { GetClipboardData(format) };
         // SAFETY: `handle` came from the open clipboard.
-        let Some(bytes) = (unsafe { read_block(handle, MAX_IMAGE_BYTES) }) else {
+        let Some(bytes) = (unsafe { read_block(handle, MAX_CAPTURE_IMAGE_BYTES) }) else {
             continue;
         };
-        let dims = if format == png {
-            png_dimensions(&bytes)
+        // Encode now, while the raw block is the only copy: everything after
+        // this point works from a few megabytes of PNG instead of the DIB.
+        let (image, dims) = if format == png {
+            let image = ClipImage::from_png(&bytes);
+            let dims = image.as_ref().map(ClipImage::dims);
+            (image, dims)
         } else {
-            dib_dimensions(&bytes)
+            match ClipImage::from_dib(&bytes) {
+                Some(image) => {
+                    let dims = image.dims();
+                    (Some(image), Some(dims))
+                }
+                None => (None, dib_dimensions(&bytes)),
+            }
         };
-        let preview = dims.map_or_else(|| "Image".to_string(), |(w, h)| format!("Image {w}×{h}"));
-        let item = ClipItem::new(ClipKind::Image, None, Vec::new(), bytes.len(), now_ms)
-            .with_preview(preview);
-        return Some(Captured {
-            item,
-            image: Some(bytes),
+        let dims = dims.or_else(|| {
+            if format == png {
+                png_dimensions(&bytes)
+            } else {
+                dib_dimensions(&bytes)
+            }
         });
+        let preview = dims.map_or_else(|| "Image".to_string(), |(w, h)| format!("Image {w}×{h}"));
+        let byte_len = image
+            .as_ref()
+            .map_or(bytes.len(), pastebox_core::ClipImage::encoded_len);
+        let mut item = ClipItem::new(ClipKind::Image, None, Vec::new(), byte_len, now_ms)
+            .with_preview(preview);
+        if let Some(image) = image {
+            item = item.with_image(image);
+        }
+        return Some(item);
     }
     None
 }
@@ -302,8 +323,7 @@ pub fn capture(now_ms: u64) -> Option<Captured> {
         // SAFETY: the clipboard is open on this thread.
         if let Some(files) = unsafe { read_files() } {
             let bytes = total_file_bytes(&files);
-            let item = ClipItem::new(ClipKind::Files, None, files, bytes, now_ms);
-            return Some(Captured { item, image: None });
+            return Some(ClipItem::new(ClipKind::Files, None, files, bytes, now_ms));
         }
     }
 
@@ -317,8 +337,7 @@ pub fn capture(now_ms: u64) -> Option<Captured> {
                     ClipKind::Text
                 };
                 let len = text.len();
-                let item = ClipItem::new(kind, Some(text), Vec::new(), len, now_ms);
-                return Some(Captured { item, image: None });
+                return Some(ClipItem::new(kind, Some(text), Vec::new(), len, now_ms));
             }
         }
     }
@@ -538,46 +557,6 @@ pub fn capture_previous() -> Previous {
         Previous::Empty
     } else {
         Previous::Saved(Snapshot { text, files, dib })
-    }
-}
-
-/// Raw image blocks kept beside the model, keyed by clip id, so an image row can
-/// be pasted back. Bounded by both entry count and total bytes.
-#[derive(Default)]
-pub struct ImageCache {
-    entries: std::collections::VecDeque<(u64, Vec<u8>)>,
-    bytes: usize,
-}
-
-const MAX_CACHED_IMAGES: usize = 24;
-const MAX_CACHE_BYTES: usize = 32 * 1024 * 1024;
-
-impl ImageCache {
-    pub fn put(&mut self, id: u64, bytes: Vec<u8>) {
-        self.forget(id);
-        self.bytes += bytes.len();
-        self.entries.push_back((id, bytes));
-        while self.entries.len() > MAX_CACHED_IMAGES || self.bytes > MAX_CACHE_BYTES {
-            match self.entries.pop_front() {
-                Some((_, dropped)) => self.bytes -= dropped.len(),
-                None => break,
-            }
-        }
-    }
-
-    pub fn get(&self, id: u64) -> Option<&[u8]> {
-        self.entries
-            .iter()
-            .find(|(key, _)| *key == id)
-            .map(|(_, bytes)| bytes.as_slice())
-    }
-
-    pub fn forget(&mut self, id: u64) {
-        if let Some(pos) = self.entries.iter().position(|(key, _)| *key == id) {
-            if let Some((_, dropped)) = self.entries.remove(pos) {
-                self.bytes -= dropped.len();
-            }
-        }
     }
 }
 

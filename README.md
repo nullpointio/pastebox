@@ -68,6 +68,34 @@ cargo build --release --target x86_64-pc-windows-gnu -p pastebox-app
 hotkey, paste-back, tray. `pastebox-app` wires them together and exposes `-smoke` / `-selftest` so CI
 runs the actual exe on Windows before any release.
 
+## Memory
+
+The history is in-memory by design, so it is also bounded by design:
+
+- **Images are stored encoded.** A clipboard image arrives as a raw DIB (~4 bytes per pixel — 33 MB
+  for a 4K screenshot). It is converted to PNG once, on capture, together with a ≤96 px thumbnail;
+  the raw block is freed immediately. Rows draw the thumbnail, and the full pixels are decoded only
+  for the row being previewed or pasted.
+- **Per-item caps.** Text is capped at 1 MB, an image's encoded payload at 8 MB (over that, the row
+  and thumbnail stay, the pasteable pixels go).
+- **Byte budget.** Beyond the 500-item cap the history also holds at most 48 MB of payload; the
+  oldest unpinned rows are evicted first.
+- **Textures are viewport-scoped.** Row thumbnails live on the GPU only while their row is on screen,
+  and exactly one full-size preview texture exists at a time.
+
+`pastebox -mem` runs a scripted session (60 screenshots, 40 text clips, 20 panel opens) and prints the
+peak working set, so memory claims can be measured instead of estimated:
+
+```bash
+pastebox -mem
+# clips=100 images=60 retained=1.9 MB
+# encoded 60 screenshots: avg 10 KB each from 296.6 MB of DIBs (7.58 s encode)
+# steady RSS 23.6 MB
+# peak RSS 28.8 MB (before the session 21.3 MB), scripted run 10.60 s
+```
+
+The same script against v1.0.2's pipeline peaks at **56.0 MB** and keeps **29.7 MB** of raw DIBs.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

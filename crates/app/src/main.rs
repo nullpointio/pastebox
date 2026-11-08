@@ -4,6 +4,7 @@
 //! `-smoke` and `-selftest` exist so CI can prove the Win32 layer works on a
 //! Windows runner; with no arguments the app starts normally.
 
+mod mem;
 mod selftest;
 
 use std::process::ExitCode;
@@ -15,6 +16,7 @@ USAGE:
     pastebox              start Pastebox
     pastebox -smoke       run the Win32 self checks and exit
     pastebox -selftest    run the core and Win32 self checks and exit
+    pastebox -mem         run the scripted memory workload and print peak RSS
     pastebox -version     print the version and exit";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -22,6 +24,7 @@ enum Mode {
     Run,
     Smoke,
     SelfTest,
+    Mem,
     Version,
     Help,
 }
@@ -42,6 +45,7 @@ fn main() -> ExitCode {
         match arg.as_str() {
             "-smoke" => mode = promote(mode, Mode::Smoke),
             "-selftest" => mode = promote(mode, Mode::SelfTest),
+            "-mem" => mode = promote(mode, Mode::Mem),
             "-version" | "--version" | "-V" => mode = promote(mode, Mode::Version),
             "-h" | "--help" => mode = Mode::Help,
             other => {
@@ -62,6 +66,10 @@ fn main() -> ExitCode {
         }
         Mode::Smoke => ExitCode::from(u8::from(!platform_smoke())),
         Mode::SelfTest => ExitCode::from(u8::from(!selftest::run())),
+        Mode::Mem => {
+            mem::run();
+            ExitCode::SUCCESS
+        }
         Mode::Run => launch(),
     }
 }

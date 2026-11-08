@@ -1,21 +1,36 @@
 //! The in-memory history: newest first, bounded, dedupe-on-insert.
+//!
+//! Two limits apply, because a count limit alone is not a memory policy: 500
+//! clips of 1 MB text would be half a gigabyte. The item cap bounds how many
+//! rows the list holds; the byte budget bounds what those rows actually cost.
+//!
+//! Per-item payloads are capped on the way in ([`MAX_TEXT_BYTES`],
+//! [`MAX_IMAGE_BYTES`]). Text over the limit is truncated; an image over the
+//! limit keeps its row and thumbnail but loses its pasteable pixels. Then the
+//! oldest unpinned rows are evicted until the store fits both limits.
 
 use crate::clip::ClipItem;
+use crate::image::{MAX_IMAGE_BYTES, MAX_TEXT_BYTES};
 use crate::search::rank;
 
 /// PRD default history size.
 pub const DEFAULT_CAPACITY: usize = 500;
 
+/// Bytes of payload the history may hold before the oldest unpinned rows are
+/// evicted. Sized so a screenful of screenshots plus a long tail of text fits
+/// comfortably inside the product's memory budget.
+pub const DEFAULT_BYTE_BUDGET: usize = 48 * 1024 * 1024;
+
 /// A bounded, newest-first list of clips.
 ///
-/// The only retention rule core enforces is the item cap: when full, the oldest
-/// **unpinned** clip is evicted. Pinned clips are never evicted — if every slot
-/// is pinned, the store grows rather than dropping a pin (the pin cap of 100 is
-/// a UI/settings concern).
+/// Eviction walks from the oldest row backwards and stops at pins: pinned clips
+/// are never evicted, so if every remaining row is pinned the store grows rather
+/// than dropping one (the pin cap of 100 is a UI/settings concern).
 #[derive(Debug, Clone)]
 pub struct Store {
     items: Vec<ClipItem>,
     capacity: usize,
+    byte_budget: usize,
     next_id: u64,
 }
 
@@ -24,9 +39,17 @@ impl Store {
     /// silently discards everything.
     #[must_use]
     pub fn new(capacity: usize) -> Self {
+        Self::with_budget(capacity, DEFAULT_BYTE_BUDGET)
+    }
+
+    /// A store with an explicit payload budget, for tests and for callers that
+    /// want a tighter memory ceiling than the default.
+    #[must_use]
+    pub fn with_budget(capacity: usize, byte_budget: usize) -> Self {
         Self {
             items: Vec::new(),
             capacity: capacity.max(1),
+            byte_budget: byte_budget.max(1),
             next_id: 1,
         }
     }
@@ -36,13 +59,29 @@ impl Store {
         self.capacity
     }
 
+    #[must_use]
+    pub fn byte_budget(&self) -> usize {
+        self.byte_budget
+    }
+
+    /// Payload bytes currently held, as [`ClipItem::payload_bytes`] counts them.
+    #[must_use]
+    pub fn payload_bytes(&self) -> usize {
+        self.items.iter().map(ClipItem::payload_bytes).sum()
+    }
+
     /// Insert a clip, or refresh the existing row if the content is identical.
     ///
     /// Dedupe compares kind + normalised content (see
     /// [`ClipItem::dedupe_key`]): the existing row keeps its `id` and pin state,
     /// takes the newer timestamp and the new display fields, and moves to the
     /// top. Returns the id of the row that now exists.
+    ///
+    /// The payload caps are applied here rather than at capture time so every
+    /// caller — the clipboard listener, the demo, a future importer — gets the
+    /// same guarantee.
     pub fn insert(&mut self, mut item: ClipItem) -> u64 {
+        apply_caps(&mut item);
         let (kind, key) = item.dedupe_key();
 
         if let Some(pos) = self
@@ -55,9 +94,11 @@ impl Store {
             existing.text = item.text;
             existing.preview = item.preview;
             existing.files = item.files;
+            existing.image = item.image;
             existing.byte_len = item.byte_len;
             let id = existing.id;
             self.insert_sorted(existing);
+            self.evict_to_limits();
             return id;
         }
 
@@ -65,7 +106,7 @@ impl Store {
         self.next_id = self.next_id.wrapping_add(1).max(1);
         let id = item.id;
         self.insert_sorted(item);
-        self.evict_to_capacity();
+        self.evict_to_limits();
         id
     }
 
@@ -82,8 +123,8 @@ impl Store {
         self.items.insert(pos, item);
     }
 
-    fn evict_to_capacity(&mut self) {
-        while self.items.len() > self.capacity {
+    fn evict_to_limits(&mut self) {
+        while self.items.len() > self.capacity || self.payload_bytes() > self.byte_budget {
             match self.items.iter().rposition(|item| !item.pinned) {
                 Some(pos) => {
                     self.items.remove(pos);
@@ -162,4 +203,32 @@ impl Default for Store {
     fn default() -> Self {
         Self::new(DEFAULT_CAPACITY)
     }
+}
+
+/// Enforce the per-item payload caps.
+fn apply_caps(item: &mut ClipItem) {
+    if let Some(text) = item.text.as_mut() {
+        if text.len() > MAX_TEXT_BYTES {
+            let cut = floor_char_boundary(text, MAX_TEXT_BYTES);
+            text.truncate(cut);
+            text.shrink_to_fit();
+        }
+    }
+    if let Some(image) = item.image.as_mut() {
+        if image.encoded_len() > MAX_IMAGE_BYTES {
+            image.drop_payload();
+        }
+    }
+}
+
+/// Largest index `<= max` that lies on a `char` boundary.
+fn floor_char_boundary(s: &str, max: usize) -> usize {
+    if max >= s.len() {
+        return s.len();
+    }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    end
 }
