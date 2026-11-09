@@ -1,6 +1,6 @@
 # Pastebox — searchable Windows clipboard history, offline and account-free
 
-**A Windows clipboard history that opens instantly with `Win+Alt+V`, searches text, images, and files as you type, and remembers nothing you didn't pin. No account, no cloud, nothing on disk unless you pin it.**
+**A Windows 10/11 clipboard history that opens instantly with `Win+Alt+V`, searches text, images, and files as you type, and remembers nothing you didn't pin. No account, no cloud, nothing on disk unless you pin it.**
 
 Press `Win+Alt+V`. A quiet panel opens over whatever you're doing with everything you've copied —
 text, links, images, files — newest first. Type three letters, hit Enter, and it's pasted where you
