@@ -1,6 +1,6 @@
-# Pastebox
+# Pastebox — searchable Windows clipboard history, offline and account-free
 
-**A clipboard history that opens instantly, searches properly, and remembers nothing you didn't pin.**
+**A Windows clipboard history that opens instantly with `Win+Alt+V`, searches text, images, and files as you type, and remembers nothing you didn't pin. No account, no cloud, nothing on disk unless you pin it.**
 
 Press `Win+Alt+V`. A quiet panel opens over whatever you're doing with everything you've copied —
 text, links, images, files — newest first. Type three letters, hit Enter, and it's pasted where you
@@ -21,6 +21,12 @@ were. Nothing leaves your machine, and nothing is written to disk unless you pin
 Windows keeps 25 items, has no search, wipes the list on restart, drops anything over 4 MB, and never
 records files at all. Pastebox keeps 500 items, searches them as you type, captures files and images,
 and lets you pin the ten things you paste all day.
+
+## Common questions
+
+**How do I search my Windows clipboard history?** Press `Win+Alt+V` to open Pastebox, then type any part of the text, file name, or image you copied. The list filters as you type; `Enter` pastes the selected item into the window you were in.
+
+**Does Pastebox keep clipboard history after a restart?** Only pinned items survive a restart. Unpinned text, images, and files live in memory and disappear when Pastebox exits; the footer shows `0 B` on disk unless you have pins.
 
 ## Privacy — read this before you install it
 
