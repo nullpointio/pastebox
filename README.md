@@ -102,6 +102,12 @@ pastebox -mem
 
 The same script against v1.0.2's pipeline peaks at **56.0 MB** and keeps **29.7 MB** of raw DIBs.
 
+## Archived copy
+
+An independent, permanently addressable copy of this repository is kept by Software Heritage:
+
+* snapshot `swh:1:snp:93a445c4805ae9ba0a4e31d178726d82148b00ab` — [https://archive.softwareheritage.org/swh:1:snp:93a445c4805ae9ba0a4e31d178726d82148b00ab;origin=https://github.com/nullpointio/pastebox](https://archive.softwareheritage.org/swh:1:snp:93a445c4805ae9ba0a4e31d178726d82148b00ab;origin=https://github.com/nullpointio/pastebox)
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
